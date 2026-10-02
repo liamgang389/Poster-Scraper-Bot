@@ -55,6 +55,8 @@ def _blocking_scrape_mxplayer(url: str) -> dict | None:
         return None
 
     # Step 2: Content ID se full metadata (title + poster) nikalo
+    # NOTE: userid aur content-languages params zaroori hain -- in ke
+    # bina MX Player ka server 502 deta hai.
     detail_resp = scraper.get(
         "https://api.mxplay.com/v1/web/detail/video",
         params={
@@ -62,6 +64,8 @@ def _blocking_scrape_mxplayer(url: str) -> dict | None:
             "id": content_id,
             "platform": "com.mxplay.desktop",
             "device-density": 2,
+            "userid": "30bb09af-733a-413b-b8b7-b10348ec2b3d",
+            "content-languages": "hi,mr,pa,bn,en,ml,kn,gu,te,ta",
         },
         timeout=20,
         proxies=proxies,
