@@ -57,10 +57,16 @@ async def main():
 
     Formatter.converter = changetz
 
+    # Web server ko SABSE PEHLE start karo -- isse Render/UptimeRobot ka
+    # health check turant pass ho jaata hai, chahe Pyrogram session
+    # connect hone me time lage. Pehle ye call sabse last me tha, jiski
+    # wajah se startup/cold-start ke dauran 502 Bad Gateway aata tha.
+    await load_configurations()
+
     await gather(
         TgClient.start_bot(), TgClient.start_user()
     )
-    await gather(load_configurations(), update_variables())
+    await update_variables()
 
     from .helper.ext_utils.files_utils import clean_all
     from .helper.ext_utils.telegraph_helper import telegraph
