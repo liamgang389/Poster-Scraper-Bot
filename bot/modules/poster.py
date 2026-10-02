@@ -269,10 +269,18 @@ async def poster(_, message):
             )
 
         elif response.status_code >= 400:
+            # Asli error detail bhi dikhao taaki pata chale API
+            # exactly kyun fail hui (debugging ke liye)
+            try:
+                detail = response.json()
+                detail = detail.get("message") or detail.get("error") or str(detail)
+            except Exception:
+                detail = response.text[:300] or "No details returned."
+
             text = (
                 f"<b>Error:</b> "
-                f"<code>Poster API error "
-                f"{response.status_code}</code>"
+                f"<code>Poster API error {response.status_code}</code>\n\n"
+                f"<b>Details:</b> <code>{escape(str(detail))}</code>"
             )
 
         else:
