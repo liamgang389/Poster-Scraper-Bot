@@ -30,6 +30,11 @@ class Config:
     POSTER_API_URL = "https://thezakeapi.vercel.app"
     POSTER_API_TOKEN = "thezake"
 
+    # Webshare proxy -- bot-protected OTT pages (MX Player, Zee5) ke
+    # liye direct-scrape me use hota hai. Format:
+    # http://username:password@p.webshare.io:port
+    SCRAPER_PROXY_URL = ""
+
     AUTHOR_NAME = "TheZake"
     AUTHOR_URL = "https://t.me/TheZake"
 
