@@ -25,11 +25,23 @@ def _blocking_scrape_og_tags(url: str) -> dict | None:
     cloudscraper se page fetch karke og:title / og:image public
     meta tags se nikaalta hai. Ye blocking call hai, isliye thread
     pool me chalaya jaata hai (neeche scrape_og_tags wrapper me).
+
+    Agar Config.SCRAPER_PROXY_URL set hai (Webshare proxy), to usi
+    se request jaayegi -- MX Player jaise bot-protected sites ke
+    against direct server IP se zyada reliable rahega.
     """
     scraper = create_scraper(
         browser={"browser": "chrome", "platform": "android", "mobile": True}
     )
-    resp = scraper.get(url, timeout=30)
+
+    proxies = None
+    if Config.SCRAPER_PROXY_URL:
+        proxies = {
+            "http": Config.SCRAPER_PROXY_URL,
+            "https": Config.SCRAPER_PROXY_URL,
+        }
+
+    resp = scraper.get(url, timeout=30, proxies=proxies)
     resp.raise_for_status()
     html = resp.text
 
