@@ -170,7 +170,7 @@ def format_result(data: dict, platform: str, url: str) -> str:
             if poster_lines
             else "• No posters found."
         )
-        + "\n\n<blockquote>Bot By ➤ @TheZake</blockquote>"
+        + "\n\n<blockquote>Bot By ➤ @Heart_broker0</blockquote>"
     )
 
 
@@ -312,8 +312,8 @@ async def poster(_, message):
         )
 
     buttons = ButtonMaker()
-    buttons.url_button("Developer", "https://t.me/TheZake", style=ButtonStyle.PRIMARY)
-    buttons.url_button("⭐ Source Code", "https://github.com/ImKrishana/Poster-Scraper-Bot", style=ButtonStyle.SUCCESS)
+    buttons.url_button("Developer", "https://t.me/Heart_broker0", style=ButtonStyle.PRIMARY)
+    buttons.url_button("⭐ Source Code", "https://t.me/CrazyHubSupport", style=ButtonStyle.SUCCESS)
 
 
     if waiting:
