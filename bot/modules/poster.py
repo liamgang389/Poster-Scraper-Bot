@@ -20,6 +20,78 @@ from ..helper.telegram_helper.button_build import ButtonMaker
 DIRECT_SCRAPE_PLATFORMS = {"mxplayer", "zee5"}
 
 
+def _blocking_scrape_mxplayer(url: str) -> dict | None:
+    """
+    MX Player apne website pe content SPA (JavaScript) se render karta
+    hai, isliye raw HTML me og:image nahi milta. MX Player ka apna
+    frontend bhi internally isi public, unauthenticated API chain ko
+    call karke title/poster nikalta hai -- hum bhi wahi karte hain.
+    (Sirf metadata: title + poster image. Video/stream/DRM URLs
+    jaan-bujh kar yahan nahi nikaale ja rahe.)
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    path = _urlparse(url).path  # e.g. /detail/episode/5a0b7e21...
+
+    scraper = create_scraper()
+    proxies = None
+    if Config.SCRAPER_PROXY_URL:
+        proxies = {"http": Config.SCRAPER_PROXY_URL, "https": Config.SCRAPER_PROXY_URL}
+
+    # Step 1: URL ko MX Player ke internal content-id me resolve karo
+    seo_resp = scraper.get(
+        "https://seo.mxplay.com/v1/api/seo/get-url-details",
+        params={"url": path},
+        timeout=20,
+        proxies=proxies,
+    )
+    seo_resp.raise_for_status()
+    seo_data = seo_resp.json().get("data") or {}
+
+    content_id = seo_data.get("id")
+    content_type = seo_data.get("type")
+
+    if not content_id:
+        return None
+
+    # Step 2: Content ID se full metadata (title + poster) nikalo
+    detail_resp = scraper.get(
+        "https://api.mxplay.com/v1/web/detail/video",
+        params={
+            "type": content_type,
+            "id": content_id,
+            "platform": "com.mxplay.desktop",
+            "device-density": 2,
+        },
+        timeout=20,
+        proxies=proxies,
+    )
+    detail_resp.raise_for_status()
+    detail = detail_resp.json()
+
+    title = detail.get("title") or seo_data.get("title")
+    image_info = detail.get("imageInfo") or []
+    image_path = None
+    for img in image_info:
+        if isinstance(img, dict) and img.get("url"):
+            image_path = img["url"]
+            break
+
+    if not image_path:
+        return None
+
+    poster = f"https://isa-1.mxplay.com/{image_path}"
+
+    return {
+        "title": title,
+        "cover": poster,
+        "portrait": poster,
+        "thumbnail": poster,
+        "landscape": poster,
+        "year": None,
+    }
+
+
 def _blocking_scrape_og_tags(url: str) -> dict | None:
     """
     cloudscraper se page fetch karke og:title / og:image public
@@ -41,9 +113,32 @@ def _blocking_scrape_og_tags(url: str) -> dict | None:
             "https": Config.SCRAPER_PROXY_URL,
         }
 
-    resp = scraper.get(url, timeout=30, proxies=proxies)
+    # IMPORTANT: Modern sites (React/Next.js SPA) real browser ko sirf
+    # ek empty JS shell bhejti hain -- asli content JS chalne ke baad
+    # client-side render hota hai. LEKIN social-media crawlers
+    # (WhatsApp/Facebook/Telegram link-preview bots) ko server
+    # special case karta hai: unka User-Agent dekh ke pehle se
+    # pre-rendered HTML (og:image samet) bhej deta hai, taaki
+    # sharing karte waqt preview dikhe. Isliye crawler jaisa
+    # User-Agent bhejna zaroori hai -- ye koi bypass nahi, Open
+    # Graph protocol isi purpose ke liye bana hai.
+    crawler_headers = {
+        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    resp = scraper.get(url, timeout=30, proxies=proxies, headers=crawler_headers)
     resp.raise_for_status()
     html = resp.text
+
+    # Agar crawler UA se bhi SPA shell hi mila (chhota HTML), to
+    # WhatsApp ka UA bhi try karo -- har platform alag crawler ko
+    # alag treat karta hai
+    if len(html) < 3000 and "og:image" not in html:
+        alt_headers = {**crawler_headers, "User-Agent": "WhatsApp/2.23.20.0"}
+        resp = scraper.get(url, timeout=30, proxies=proxies, headers=alt_headers)
+        resp.raise_for_status()
+        html = resp.text
 
     def meta(prop: str) -> str | None:
         pattern = (
@@ -80,9 +175,11 @@ def _blocking_scrape_og_tags(url: str) -> dict | None:
     }
 
 
-async def scrape_og_tags(url: str) -> dict | None:
+async def scrape_og_tags(url: str, platform: str = None) -> dict | None:
     """cloudscraper blocking call ko async bot loop me safely chalata hai."""
     loop = get_running_loop()
+    if platform == "mxplayer":
+        return await loop.run_in_executor(None, _blocking_scrape_mxplayer, url)
     return await loop.run_in_executor(None, _blocking_scrape_og_tags, url)
 
 
@@ -301,7 +398,7 @@ async def poster(_, message):
     if platform in DIRECT_SCRAPE_PLATFORMS:
         scrape_error = None
         try:
-            data = await scrape_og_tags(url)
+            data = await scrape_og_tags(url, platform=platform)
         except Exception as error:
             LOGGER.error("Direct scrape failed for %s: %s", platform, error)
             scrape_error = str(error)
