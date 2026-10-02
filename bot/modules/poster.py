@@ -295,17 +295,20 @@ async def poster(_, message):
     # (broken/bot-blocked), isliye in platforms ke liye direct
     # built-in scraper use karo, external API call hi mat karo.
     if platform in DIRECT_SCRAPE_PLATFORMS:
+        scrape_error = None
         try:
             data = await scrape_og_tags(url)
         except Exception as error:
             LOGGER.error("Direct scrape failed for %s: %s", platform, error)
+            scrape_error = str(error)
             data = None
 
         if not data:
             text = (
                 "<b>Error:</b> "
                 "<code>Could not fetch poster — page may be blocked "
-                "or structure changed.</code>"
+                "or structure changed.</code>\n\n"
+                f"<b>Debug:</b> <code>{escape(scrape_error or 'og:image tag not found in page (page loaded but no poster meta tag).')}</code>"
             )
         else:
             text = format_result(data, platform, url)
