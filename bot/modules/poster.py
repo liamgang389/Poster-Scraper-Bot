@@ -1,14 +1,73 @@
-from html import escape
+from html import escape, unescape
 from re import search as re_search
 from urllib.parse import urlparse
 from pyrogram.enums import ButtonStyle 
 from httpx import AsyncClient, HTTPError
+from cloudscraper import create_scraper
+from asyncio import get_running_loop
 
 from .. import LOGGER
 from ..core.config_manager import Config
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.telegram_helper.message_utils import send_message
 from ..helper.telegram_helper.button_build import ButtonMaker
+
+
+# Platforms jinke liye external "thezakeapi" broken/unreliable hai --
+# in platforms ke liye direct built-in scraper use hoga (cloudscraper,
+# jo already is bot me Cloudflare bypass ke liye use hota hai),
+# bajaye external API call karne ke.
+DIRECT_SCRAPE_PLATFORMS = {"mxplayer", "zee5"}
+
+
+def _blocking_scrape_og_tags(url: str) -> dict | None:
+    """
+    cloudscraper se page fetch karke og:title / og:image public
+    meta tags se nikaalta hai. Ye blocking call hai, isliye thread
+    pool me chalaya jaata hai (neeche scrape_og_tags wrapper me).
+    """
+    scraper = create_scraper(
+        browser={"browser": "chrome", "platform": "android", "mobile": True}
+    )
+    resp = scraper.get(url, timeout=30)
+    resp.raise_for_status()
+    html = resp.text
+
+    def meta(prop: str) -> str | None:
+        pattern = (
+            rf'<meta[^>]+property=["\']' + prop +
+            rf'["\'][^>]+content=["\']([^"\']+)["\']'
+        )
+        m = re_search(pattern, html, flags=0)
+        if not m:
+            # content aur property ka order ulta bhi ho sakta hai HTML me
+            pattern2 = (
+                rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']' + prop + r'["\']'
+            )
+            m = re_search(pattern2, html)
+        return unescape(m.group(1)) if m else None
+
+    title = meta("og:title")
+    image = meta("og:image")
+    backdrop = meta("og:image:wide") or meta("og:image:secure_url")
+
+    if not image:
+        return None
+
+    return {
+        "title": title,
+        "cover": image,
+        "portrait": image,
+        "landscape": backdrop or image,
+        "thumbnail": image,
+        "year": None,
+    }
+
+
+async def scrape_og_tags(url: str) -> dict | None:
+    """cloudscraper blocking call ko async bot loop me safely chalata hai."""
+    loop = get_running_loop()
+    return await loop.run_in_executor(None, _blocking_scrape_og_tags, url)
 
 
 PLATFORM_DOMAINS = {
@@ -214,6 +273,44 @@ async def poster(_, message):
             + escape(supported),
         )
 
+    waiting = await send_message(
+        message,
+        f"<i>Fetching poster for:</i>\n"
+        f"<code>{escape(url)}</code>",
+    )
+
+    # MX Player / Zee5 ke liye external "thezakeapi" 500 deta hai
+    # (broken/bot-blocked), isliye in platforms ke liye direct
+    # built-in scraper use karo, external API call hi mat karo.
+    if platform in DIRECT_SCRAPE_PLATFORMS:
+        try:
+            data = await scrape_og_tags(url)
+        except Exception as error:
+            LOGGER.error("Direct scrape failed for %s: %s", platform, error)
+            data = None
+
+        if not data:
+            text = (
+                "<b>Error:</b> "
+                "<code>Could not fetch poster — page may be blocked "
+                "or structure changed.</code>"
+            )
+        else:
+            text = format_result(data, platform, url)
+
+        buttons = ButtonMaker()
+        buttons.url_button("Developer", "https://t.me/Heart_broker0", style=ButtonStyle.PRIMARY)
+        buttons.url_button("⭐ Source Code", "https://t.me/CrazyHubSupport", style=ButtonStyle.SUCCESS)
+
+        try:
+            return await waiting.edit(
+                text=text,
+                reply_markup=buttons.build_menu(2),
+                disable_web_page_preview=False,
+            )
+        except Exception:
+            return await send_message(message, text, reply_markup=buttons.build_menu(2))
+
     api_url = (
         Config.POSTER_API_URL
         or "https://thezakeapi.vercel.app"
@@ -234,12 +331,6 @@ async def poster(_, message):
             "<b>Poster service is not configured.</b> "
             "Please contact the bot owner.",
         )
-
-    waiting = await send_message(
-        message,
-        f"<i>Fetching poster for:</i>\n"
-        f"<code>{escape(url)}</code>",
-    )
 
     try:
         async with AsyncClient(
