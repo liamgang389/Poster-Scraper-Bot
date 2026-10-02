@@ -64,7 +64,11 @@ def _blocking_scrape_og_tags(url: str) -> dict | None:
     backdrop = meta("og:image:wide") or meta("og:image:secure_url")
 
     if not image:
-        return None
+        # Debug ke liye: pehle 400 characters HTML ke, taaki pata
+        # chale real page mila ya koi block/redirect/CAPTCHA page
+        snippet = html[:400].replace("\n", " ").replace("\r", "")
+        LOGGER.info(f"[DEBUG mxplayer/zee5] HTML length={len(html)} | status={resp.status_code} | final_url={resp.url} | snippet={snippet}")
+        return {"_debug_snippet": snippet, "_debug_len": len(html), "_debug_status": resp.status_code, "_debug_final_url": str(resp.url)}
 
     return {
         "title": title,
@@ -308,7 +312,17 @@ async def poster(_, message):
                 "<b>Error:</b> "
                 "<code>Could not fetch poster — page may be blocked "
                 "or structure changed.</code>\n\n"
-                f"<b>Debug:</b> <code>{escape(scrape_error or 'og:image tag not found in page (page loaded but no poster meta tag).')}</code>"
+                f"<b>Debug:</b> <code>{escape(scrape_error or 'Unknown error (no data, no exception).')}</code>"
+            )
+        elif data.get("_debug_snippet") is not None:
+            # og:image nahi mila -- actual raw HTML snippet dikhao
+            # taaki pata chale real content aaya ya block/redirect page
+            text = (
+                "<b>Debug Info (og:image not found):</b>\n\n"
+                f"<b>HTTP Status:</b> <code>{data['_debug_status']}</code>\n"
+                f"<b>Final URL:</b> <code>{escape(data['_debug_final_url'])}</code>\n"
+                f"<b>HTML Length:</b> <code>{data['_debug_len']} chars</code>\n\n"
+                f"<b>First 400 chars:</b>\n<code>{escape(data['_debug_snippet'])}</code>"
             )
         else:
             text = format_result(data, platform, url)
