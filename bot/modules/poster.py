@@ -1,190 +1,14 @@
-from html import escape, unescape
+from html import escape
 from re import search as re_search
 from urllib.parse import urlparse
 from pyrogram.enums import ButtonStyle 
 from httpx import AsyncClient, HTTPError
-from cloudscraper import create_scraper
-from asyncio import get_running_loop
 
 from .. import LOGGER
 from ..core.config_manager import Config
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.telegram_helper.message_utils import send_message
 from ..helper.telegram_helper.button_build import ButtonMaker
-
-
-# Platforms jinke liye external "thezakeapi" broken/unreliable hai --
-# in platforms ke liye direct built-in scraper use hoga (cloudscraper,
-# jo already is bot me Cloudflare bypass ke liye use hota hai),
-# bajaye external API call karne ke.
-DIRECT_SCRAPE_PLATFORMS = {"mxplayer", "zee5"}
-
-
-def _blocking_scrape_mxplayer(url: str) -> dict | None:
-    """
-    MX Player apne website pe content SPA (JavaScript) se render karta
-    hai, isliye raw HTML me og:image nahi milta. MX Player ka apna
-    frontend bhi internally isi public, unauthenticated API chain ko
-    call karke title/poster nikalta hai -- hum bhi wahi karte hain.
-    (Sirf metadata: title + poster image. Video/stream/DRM URLs
-    jaan-bujh kar yahan nahi nikaale ja rahe.)
-    """
-    from urllib.parse import urlparse as _urlparse
-
-    path = _urlparse(url).path  # e.g. /detail/episode/5a0b7e21...
-
-    scraper = create_scraper()
-    proxies = None
-    if Config.SCRAPER_PROXY_URL:
-        proxies = {"http": Config.SCRAPER_PROXY_URL, "https": Config.SCRAPER_PROXY_URL}
-
-    # Step 1: URL ko MX Player ke internal content-id me resolve karo
-    seo_resp = scraper.get(
-        "https://seo.mxplay.com/v1/api/seo/get-url-details",
-        params={"url": path},
-        timeout=20,
-        proxies=proxies,
-    )
-    seo_resp.raise_for_status()
-    seo_data = seo_resp.json().get("data") or {}
-
-    content_id = seo_data.get("id")
-    content_type = seo_data.get("type")
-
-    if not content_id:
-        return None
-
-    # Step 2: Content ID se full metadata (title + poster) nikalo
-    # NOTE: userid aur content-languages params zaroori hain -- in ke
-    # bina MX Player ka server 502 deta hai.
-    detail_resp = scraper.get(
-        "https://api.mxplay.com/v1/web/detail/video",
-        params={
-            "type": content_type,
-            "id": content_id,
-            "platform": "com.mxplay.desktop",
-            "device-density": 2,
-            "userid": "30bb09af-733a-413b-b8b7-b10348ec2b3d",
-            "content-languages": "hi,mr,pa,bn,en,ml,kn,gu,te,ta",
-        },
-        timeout=20,
-        proxies=proxies,
-    )
-    detail_resp.raise_for_status()
-    detail = detail_resp.json()
-
-    title = detail.get("title") or seo_data.get("title")
-    image_info = detail.get("imageInfo") or []
-    image_path = None
-    for img in image_info:
-        if isinstance(img, dict) and img.get("url"):
-            image_path = img["url"]
-            break
-
-    if not image_path:
-        return None
-
-    poster = f"https://isa-1.mxplay.com/{image_path}"
-
-    return {
-        "title": title,
-        "cover": poster,
-        "portrait": poster,
-        "thumbnail": poster,
-        "landscape": poster,
-        "year": None,
-    }
-
-
-def _blocking_scrape_og_tags(url: str) -> dict | None:
-    """
-    cloudscraper se page fetch karke og:title / og:image public
-    meta tags se nikaalta hai. Ye blocking call hai, isliye thread
-    pool me chalaya jaata hai (neeche scrape_og_tags wrapper me).
-
-    Agar Config.SCRAPER_PROXY_URL set hai (Webshare proxy), to usi
-    se request jaayegi -- MX Player jaise bot-protected sites ke
-    against direct server IP se zyada reliable rahega.
-    """
-    scraper = create_scraper(
-        browser={"browser": "chrome", "platform": "android", "mobile": True}
-    )
-
-    proxies = None
-    if Config.SCRAPER_PROXY_URL:
-        proxies = {
-            "http": Config.SCRAPER_PROXY_URL,
-            "https": Config.SCRAPER_PROXY_URL,
-        }
-
-    # IMPORTANT: Modern sites (React/Next.js SPA) real browser ko sirf
-    # ek empty JS shell bhejti hain -- asli content JS chalne ke baad
-    # client-side render hota hai. LEKIN social-media crawlers
-    # (WhatsApp/Facebook/Telegram link-preview bots) ko server
-    # special case karta hai: unka User-Agent dekh ke pehle se
-    # pre-rendered HTML (og:image samet) bhej deta hai, taaki
-    # sharing karte waqt preview dikhe. Isliye crawler jaisa
-    # User-Agent bhejna zaroori hai -- ye koi bypass nahi, Open
-    # Graph protocol isi purpose ke liye bana hai.
-    crawler_headers = {
-        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-
-    resp = scraper.get(url, timeout=30, proxies=proxies, headers=crawler_headers)
-    resp.raise_for_status()
-    html = resp.text
-
-    # Agar crawler UA se bhi SPA shell hi mila (chhota HTML), to
-    # WhatsApp ka UA bhi try karo -- har platform alag crawler ko
-    # alag treat karta hai
-    if len(html) < 3000 and "og:image" not in html:
-        alt_headers = {**crawler_headers, "User-Agent": "WhatsApp/2.23.20.0"}
-        resp = scraper.get(url, timeout=30, proxies=proxies, headers=alt_headers)
-        resp.raise_for_status()
-        html = resp.text
-
-    def meta(prop: str) -> str | None:
-        pattern = (
-            rf'<meta[^>]+property=["\']' + prop +
-            rf'["\'][^>]+content=["\']([^"\']+)["\']'
-        )
-        m = re_search(pattern, html, flags=0)
-        if not m:
-            # content aur property ka order ulta bhi ho sakta hai HTML me
-            pattern2 = (
-                rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']' + prop + r'["\']'
-            )
-            m = re_search(pattern2, html)
-        return unescape(m.group(1)) if m else None
-
-    title = meta("og:title")
-    image = meta("og:image")
-    backdrop = meta("og:image:wide") or meta("og:image:secure_url")
-
-    if not image:
-        # Debug ke liye: pehle 400 characters HTML ke, taaki pata
-        # chale real page mila ya koi block/redirect/CAPTCHA page
-        snippet = html[:400].replace("\n", " ").replace("\r", "")
-        LOGGER.info(f"[DEBUG mxplayer/zee5] HTML length={len(html)} | status={resp.status_code} | final_url={resp.url} | snippet={snippet}")
-        return {"_debug_snippet": snippet, "_debug_len": len(html), "_debug_status": resp.status_code, "_debug_final_url": str(resp.url)}
-
-    return {
-        "title": title,
-        "cover": image,
-        "portrait": image,
-        "landscape": backdrop or image,
-        "thumbnail": image,
-        "year": None,
-    }
-
-
-async def scrape_og_tags(url: str, platform: str = None) -> dict | None:
-    """cloudscraper blocking call ko async bot loop me safely chalata hai."""
-    loop = get_running_loop()
-    if platform == "mxplayer":
-        return await loop.run_in_executor(None, _blocking_scrape_mxplayer, url)
-    return await loop.run_in_executor(None, _blocking_scrape_og_tags, url)
 
 
 PLATFORM_DOMAINS = {
@@ -346,7 +170,7 @@ def format_result(data: dict, platform: str, url: str) -> str:
             if poster_lines
             else "• No posters found."
         )
-        + "\n\n<blockquote>Bot By ➤ @Heart_broker0</blockquote>"
+        + "\n\n<blockquote>Bot By ➤ @TheZake</blockquote>"
     )
 
 
@@ -390,57 +214,6 @@ async def poster(_, message):
             + escape(supported),
         )
 
-    waiting = await send_message(
-        message,
-        f"<i>Fetching poster for:</i>\n"
-        f"<code>{escape(url)}</code>",
-    )
-
-    # MX Player / Zee5 ke liye external "thezakeapi" 500 deta hai
-    # (broken/bot-blocked), isliye in platforms ke liye direct
-    # built-in scraper use karo, external API call hi mat karo.
-    if platform in DIRECT_SCRAPE_PLATFORMS:
-        scrape_error = None
-        try:
-            data = await scrape_og_tags(url, platform=platform)
-        except Exception as error:
-            LOGGER.error("Direct scrape failed for %s: %s", platform, error)
-            scrape_error = str(error)
-            data = None
-
-        if not data:
-            text = (
-                "<b>Error:</b> "
-                "<code>Could not fetch poster — page may be blocked "
-                "or structure changed.</code>\n\n"
-                f"<b>Debug:</b> <code>{escape(scrape_error or 'Unknown error (no data, no exception).')}</code>"
-            )
-        elif data.get("_debug_snippet") is not None:
-            # og:image nahi mila -- actual raw HTML snippet dikhao
-            # taaki pata chale real content aaya ya block/redirect page
-            text = (
-                "<b>Debug Info (og:image not found):</b>\n\n"
-                f"<b>HTTP Status:</b> <code>{data['_debug_status']}</code>\n"
-                f"<b>Final URL:</b> <code>{escape(data['_debug_final_url'])}</code>\n"
-                f"<b>HTML Length:</b> <code>{data['_debug_len']} chars</code>\n\n"
-                f"<b>First 400 chars:</b>\n<code>{escape(data['_debug_snippet'])}</code>"
-            )
-        else:
-            text = format_result(data, platform, url)
-
-        buttons = ButtonMaker()
-        buttons.url_button("Developer", "https://t.me/Heart_broker0", style=ButtonStyle.PRIMARY)
-        buttons.url_button("⭐ Source Code", "https://t.me/CrazyHubSupport", style=ButtonStyle.SUCCESS)
-
-        try:
-            return await waiting.edit(
-                text=text,
-                reply_markup=buttons.build_menu(2),
-                disable_web_page_preview=False,
-            )
-        except Exception:
-            return await send_message(message, text, reply_markup=buttons.build_menu(2))
-
     api_url = (
         Config.POSTER_API_URL
         or "https://thezakeapi.vercel.app"
@@ -461,6 +234,12 @@ async def poster(_, message):
             "<b>Poster service is not configured.</b> "
             "Please contact the bot owner.",
         )
+
+    waiting = await send_message(
+        message,
+        f"<i>Fetching poster for:</i>\n"
+        f"<code>{escape(url)}</code>",
+    )
 
     try:
         async with AsyncClient(
@@ -490,18 +269,10 @@ async def poster(_, message):
             )
 
         elif response.status_code >= 400:
-            # Asli error detail bhi dikhao taaki pata chale API
-            # exactly kyun fail hui (debugging ke liye)
-            try:
-                detail = response.json()
-                detail = detail.get("message") or detail.get("error") or str(detail)
-            except Exception:
-                detail = response.text[:300] or "No details returned."
-
             text = (
                 f"<b>Error:</b> "
-                f"<code>Poster API error {response.status_code}</code>\n\n"
-                f"<b>Details:</b> <code>{escape(str(detail))}</code>"
+                f"<code>Poster API error "
+                f"{response.status_code}</code>"
             )
 
         else:
@@ -541,8 +312,8 @@ async def poster(_, message):
         )
 
     buttons = ButtonMaker()
-    buttons.url_button("Developer", "https://t.me/Heart_broker0", style=ButtonStyle.PRIMARY)
-    buttons.url_button("⭐ Source Code", "https://t.me/CrazyHubSupport", style=ButtonStyle.SUCCESS)
+    buttons.url_button("Developer", "https://t.me/TheZake", style=ButtonStyle.PRIMARY)
+    buttons.url_button("⭐ Source Code", "https://github.com/ImKrishana/Poster-Scraper-Bot", style=ButtonStyle.SUCCESS)
 
 
     if waiting:
